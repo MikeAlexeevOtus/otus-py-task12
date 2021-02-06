@@ -17,6 +17,8 @@ import appsinstalled_pb2
 # pip install python-memcached
 import memcache
 
+NUM_THREADS = 4
+BATCH_SIZE = 10
 NORMAL_ERR_RATE = 0.01
 AppsInstalled = collections.namedtuple(
     "AppsInstalled",
@@ -64,10 +66,6 @@ def init_mc_connections(options):
     return mc_connections
 
 
-def close_mc_connections(mc_connections):
-    pass
-
-
 class Worker(threading.Thread):
 
     SENTINEL = 'quit'
@@ -78,11 +76,12 @@ class Worker(threading.Thread):
 
     def run(self):
         while True:
-            task = self.queue.get()
+            tasks_batch = self.queue.get()
             self.queue.task_done()
-            if isinstance(task, str) and task == self.SENTINEL:
+            if isinstance(tasks_batch, str) and tasks_batch == self.SENTINEL:
                 break
-            task.execute()
+            for task in tasks_batch:
+                task.execute()
 
 
 class UploadTask(object):
@@ -193,13 +192,19 @@ def process_one_file(fn, mc_connections, tasks_queue, dry_run):
     results_list = []
     logging.info('Processing %s', fn)
     fd = gzip.open(fn)
+    tasks_batch = []
     for line in fd:
         try:
-            tasks_queue.put(make_upload_task(line, mc_connections, results_list, dry_run))
+            tasks_batch.append(make_upload_task(line, mc_connections, results_list, dry_run))
         except Exception as e:
             logging.error(e)
             results_list.append(STATUS_ERR)
+        if len(tasks_batch) == BATCH_SIZE:
+            tasks_queue.put(tasks_batch)
+            tasks_batch = []
 
+    # add tasks from last iterations
+    tasks_queue.put(tasks_batch)
     tasks_queue.join()
     log_err_stat(fn, results_list)
 
@@ -219,7 +224,7 @@ def make_workers(queue, size):
 def main(options):
     mc_connections = init_mc_connections(options)
     tasks_queue = Queue.Queue()
-    workers = make_workers(tasks_queue, 4)
+    workers = make_workers(tasks_queue, NUM_THREADS)
     for fn in glob.iglob(options.pattern):
         process_one_file(fn, mc_connections, tasks_queue, options.dry)
     for _ in workers:
