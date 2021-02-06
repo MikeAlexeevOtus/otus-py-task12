@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import collections
+import functools
 import glob
 import gzip
 import logging
@@ -31,9 +32,24 @@ McConnection = collections.namedtuple(
 )
 
 
+def retry_if_fails(num_retries):
+    if num_retries < 0:
+        raise ValueError('num_retries must be >= 0')
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            num_retries_ = num_retries
+            while num_retries_:
+                try:
+                    return func(*args, **kwargs)
+                except Exception:
+                    num_retries_ -= 1
+            return func(*args, **kwargs)
+
+
 def init_mc_connections(options):
     def connect(addr):
-        # @TODO retry and timeouts!
         return memcache.Client([addr])
 
     mc_connections = {}
@@ -81,11 +97,15 @@ class UploadTask(object):
 
         try:
             with self.mc_connection.lock:
-                self.mc_connection.client.set(self.key, self.protobuf_struct.SerializeToString())
+                self._set_mc_value()
             self.results_list.append(STATUS_OK)
         except Exception, e:
             logging.exception("Cannot write to memc %s: %s", self.mc_connection.addr, e)
             self.results_list.append(STATUS_ERR)
+
+    @retry_if_fails(5)
+    def _set_mc_value(self):
+        self.mc_connection.client.set(self.key, self.protobuf_struct.SerializeToString())
 
     def __repr__(self):
         return "%s - %s -> %s" % (self.mc_connection.addr,
