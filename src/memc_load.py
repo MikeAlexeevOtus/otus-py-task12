@@ -50,6 +50,8 @@ def close_mc_connections(mc_connections):
 
 class Worker(threading.Thread):
 
+    SENTINEL = 'quit'
+
     def __init__(self, queue):
         super(Worker, self).__init__()
         self.queue = queue
@@ -58,7 +60,7 @@ class Worker(threading.Thread):
         while True:
             task = self.queue.get()
             self.queue.task_done()
-            if isinstance(task, str) and task == 'quit':
+            if isinstance(task, str) and task == self.SENTINEL:
                 break
             task.execute()
 
@@ -197,7 +199,7 @@ def main(options):
     for fn in glob.iglob(options.pattern):
         process_one_file(fn, mc_connections, tasks_queue, options.dry)
     for _ in workers:
-        tasks_queue.put('quit')
+        tasks_queue.put(Worker.SENTINEL)
     tasks_queue.join()
 
 
