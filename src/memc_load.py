@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import threading
+import Queue
 from optparse import OptionParser
 # brew install protobuf
 # protoc  --python_out=. ./appsinstalled.proto
@@ -21,7 +22,6 @@ AppsInstalled = collections.namedtuple(
     ["dev_type", "dev_id", "lat", "lon", "apps"]
 )
 
-STATUS_SKIP = -1
 STATUS_ERR = 0
 STATUS_OK = 1
 
@@ -48,13 +48,47 @@ def close_mc_connections(mc_connections):
     pass
 
 
-def put_to_mc(mc_connection, key, value):
-    try:
-        mc_connection.client.set(key, value)
-        return STATUS_OK
-    except Exception, e:
-        logging.exception("Cannot write to memc %s: %s", mc_connection.addr, e)
-        return STATUS_ERR
+class Worker(threading.Thread):
+
+    def __init__(self, queue):
+        super(Worker, self).__init__()
+        self.queue = queue
+
+    def run(self):
+        while True:
+            task = self.queue.get()
+            self.queue.task_done()
+            if isinstance(task, str) and task == 'quit':
+                break
+            task.execute()
+
+
+class UploadTask(object):
+    def __init__(self, mc_connection, key, protobuf_struct, results_list, dry_run=False):
+        self.mc_connection = mc_connection
+        self.key = key
+        self.protobuf_struct = protobuf_struct
+        self.results_list = results_list
+        self.dry_run = dry_run
+
+    def execute(self):
+        logging.debug('run in thread %s: %s', threading.currentThread().ident, self)
+        if self.dry_run:
+            self.results_list.append(STATUS_OK)
+            return
+
+        try:
+            with self.mc_connection.lock:
+                self.mc_connection.client.set(self.key, self.protobuf_struct.SerializeToString())
+            self.results_list.append(STATUS_OK)
+        except Exception, e:
+            logging.exception("Cannot write to memc %s: %s", self.mc_connection.addr, e)
+            self.results_list.append(STATUS_ERR)
+
+    def __repr__(self):
+        return "%s - %s -> %s" % (self.mc_connection.addr,
+                                  self.key,
+                                  str(self.protobuf_struct).replace("\n", " "))
 
 
 def dot_rename(path):
@@ -98,31 +132,30 @@ def parse_appsinstalled(line):
     return AppsInstalled(dev_type, dev_id, lat, lon, apps)
 
 
-def process_one_line(line, mc_connections, dry_run):
+def make_upload_task(line, mc_connections, results_list, dry_run):
     line = line.strip()
     if not line:
-        return STATUS_SKIP
+        return
     appsinstalled = parse_appsinstalled(line)
     if not appsinstalled:
-        return STATUS_ERR
+        raise ValueError('failed to parse')
     protobuf_struct = make_protobuf_struct(appsinstalled)
 
     mc_connection = mc_connections.get(appsinstalled.dev_type)
     if not mc_connection:
-        logging.error("Unknow device type: %s", appsinstalled.dev_type)
-        return STATUS_ERR
+        raise RuntimeError("Unknow device type: %s", appsinstalled.dev_type)
 
     key = make_key(appsinstalled)
-    if dry_run:
-        logging.debug("%s - %s -> %s" % (mc_connection.addr, key, str(protobuf_struct).replace("\n", " ")))
-        return STATUS_OK
-
-    return put_to_mc(mc_connection,
-                     key=key,
-                     value=protobuf_struct.SerializeToString())
+    return UploadTask(mc_connection,
+                      key=key,
+                      protobuf_struct=protobuf_struct,
+                      results_list=results_list,
+                      dry_run=dry_run)
 
 
-def log_err_stat(fn, processed, errors):
+def log_err_stat(fn, results_list):
+    processed = results_list.count(STATUS_OK)
+    errors = results_list.count(STATUS_ERR)
     err_rate = float(errors) / processed
     if err_rate < NORMAL_ERR_RATE:
         logging.info("Acceptable error rate (%s). Successfull load %s", err_rate, fn)
@@ -130,28 +163,42 @@ def log_err_stat(fn, processed, errors):
         logging.error("High error rate (%s > %s). Failed load %s", err_rate, NORMAL_ERR_RATE, fn)
 
 
-def process_one_file(fn, mc_connections, dry_run):
-    processed = errors = 0
+def process_one_file(fn, mc_connections, tasks_queue, dry_run):
+    results_list = []
     logging.info('Processing %s', fn)
     fd = gzip.open(fn)
     for line in fd:
-        status = process_one_line(line, mc_connections, dry_run)
-        if status == STATUS_OK:
-            processed += 1
-        else:
-            errors += 1
+        try:
+            tasks_queue.put(make_upload_task(line, mc_connections, results_list, dry_run))
+        except Exception as e:
+            logging.error(e)
+            results_list.append(STATUS_ERR)
 
-    if processed:
-        log_err_stat(fn, processed, errors)
+    tasks_queue.join()
+    log_err_stat(fn, results_list)
 
     fd.close()
     dot_rename(fn)
 
 
+def make_workers(queue, size):
+    workers = []
+    for _ in range(size):
+        worker = Worker(queue)
+        worker.start()
+        workers.append(worker)
+    return workers
+
+
 def main(options):
     mc_connections = init_mc_connections(options)
+    tasks_queue = Queue.Queue()
+    workers = make_workers(tasks_queue, 4)
     for fn in glob.iglob(options.pattern):
-        process_one_file(fn, mc_connections, options.dry)
+        process_one_file(fn, mc_connections, tasks_queue, options.dry)
+    for _ in workers:
+        tasks_queue.put('quit')
+    tasks_queue.join()
 
 
 def prototest():
