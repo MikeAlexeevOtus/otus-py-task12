@@ -48,20 +48,12 @@ def close_mc_connections(mc_connections):
     pass
 
 
-def put_to_mc(mc_connections, dev_type, key, value, dry_run=False):
-    mc_connection = mc_connections.get(dev_type)
-    if not mc_connection:
-        logging.error("Unknow device type: %s", dev_type)
-        return STATUS_ERR
-    if dry_run:
-        logging.debug("%s - %s -> %s" % (mc_connection.addr, key, str(value).replace("\n", " ")))
-        return STATUS_OK
-
+def put_to_mc(mc_connection, key, value):
     try:
         mc_connection.client.set(key, value)
         return STATUS_OK
     except Exception, e:
-        logging.exception("Cannot write to memc %s: %s", mc_connection.client, e)
+        logging.exception("Cannot write to memc %s: %s", mc_connection.addr, e)
         return STATUS_ERR
 
 
@@ -114,11 +106,20 @@ def process_one_line(line, mc_connections, dry_run):
     if not appsinstalled:
         return STATUS_ERR
     protobuf_struct = make_protobuf_struct(appsinstalled)
-    return put_to_mc(mc_connections,
-                     dev_type=appsinstalled.dev_type,
-                     key=make_key(appsinstalled),
-                     value=protobuf_struct.SerializeToString(),
-                     dry_run=dry_run)
+
+    mc_connection = mc_connections.get(appsinstalled.dev_type)
+    if not mc_connection:
+        logging.error("Unknow device type: %s", appsinstalled.dev_type)
+        return STATUS_ERR
+
+    key = make_key(appsinstalled)
+    if dry_run:
+        logging.debug("%s - %s -> %s" % (mc_connection.addr, key, str(protobuf_struct).replace("\n", " ")))
+        return STATUS_OK
+
+    return put_to_mc(mc_connection,
+                     key=key,
+                     value=protobuf_struct.SerializeToString())
 
 
 def log_err_stat(fn, processed, errors):
