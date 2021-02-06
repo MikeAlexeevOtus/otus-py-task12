@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-import os
-import gzip
-import sys
-import glob
-import logging
 import collections
+import glob
+import gzip
+import logging
+import os
+import sys
+import threading
 from optparse import OptionParser
 # brew install protobuf
 # protoc  --python_out=. ./appsinstalled.proto
@@ -20,6 +21,49 @@ AppsInstalled = collections.namedtuple(
     ["dev_type", "dev_id", "lat", "lon", "apps"]
 )
 
+STATUS_ERR = 0
+STATUS_OK = 1
+
+McConnection = collections.namedtuple(
+    "McConnection",
+    ["client", "lock"]
+)
+
+
+def init_mc_connections(options):
+    def connect(addr):
+        # @TODO retry and timeouts!
+        return memcache.Client([addr])
+
+    return {
+        # TODO loop
+        "idfa": McConnection(connect(options.idfa), threading.Lock()),
+        "gaid": McConnection(connect(options.gaid), threading.Lock()),
+        "adid": McConnection(connect(options.adid), threading.Lock()),
+        "dvid": McConnection(connect(options.dvid), threading.Lock()),
+    }
+
+
+def close_mc_connections(mc_connections):
+    pass
+
+
+def put_to_mc(mc_connections, dev_type, key, val, dry_run=False):
+    mc_connection = mc_connections.get(dev_type)
+    if not mc_connection:
+        logging.error("Unknow device type: %s", dev_type)
+        return STATUS_ERR
+    if dry_run:
+        logging.debug("%s - %s -> %s" % (mc_connection.client, key, str(val).replace("\n", " ")))
+        return STATUS_OK
+
+    try:
+        mc_connection.client.set(key, val)
+        return STATUS_OK
+    except Exception, e:
+        logging.exception("Cannot write to memc %s: %s", mc_connection.client, e)
+        return STATUS_ERR
+
 
 def dot_rename(path):
     head, fn = os.path.split(path)
@@ -27,25 +71,14 @@ def dot_rename(path):
     os.rename(path, os.path.join(head, "." + fn))
 
 
-def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
+def insert_appsinstalled(mc_connections, appsinstalled, dry_run=False):
     ua = appsinstalled_pb2.UserApps()
     ua.lat = appsinstalled.lat
     ua.lon = appsinstalled.lon
     key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
     ua.apps.extend(appsinstalled.apps)
     packed = ua.SerializeToString()
-    # @TODO persistent connection
-    # @TODO retry and timeouts!
-    try:
-        if dry_run:
-            logging.debug("%s - %s -> %s" % (memc_addr, key, str(ua).replace("\n", " ")))
-        else:
-            memc = memcache.Client([memc_addr])
-            memc.set(key, packed)
-    except Exception, e:
-        logging.exception("Cannot write to memc %s: %s" % (memc_addr, e))
-        return False
-    return True
+    return put_to_mc(mc_connections, appsinstalled.dev_type, key, packed, dry_run)
 
 
 def parse_appsinstalled(line):
@@ -68,15 +101,10 @@ def parse_appsinstalled(line):
 
 
 def main(options):
-    device_memc = {
-        "idfa": options.idfa,
-        "gaid": options.gaid,
-        "adid": options.adid,
-        "dvid": options.dvid,
-    }
+    mc_connections = init_mc_connections(options)
     for fn in glob.iglob(options.pattern):
         processed = errors = 0
-        logging.info('Processing %s' % fn)
+        logging.info('Processing %s', fn)
         fd = gzip.open(fn)
         for line in fd:
             line = line.strip()
@@ -86,13 +114,8 @@ def main(options):
             if not appsinstalled:
                 errors += 1
                 continue
-            memc_addr = device_memc.get(appsinstalled.dev_type)
-            if not memc_addr:
-                errors += 1
-                logging.error("Unknow device type: %s" % appsinstalled.dev_type)
-                continue
-            ok = insert_appsinstalled(memc_addr, appsinstalled, options.dry)
-            if ok:
+            status = insert_appsinstalled(mc_connections, appsinstalled, options.dry)
+            if status == STATUS_OK:
                 processed += 1
             else:
                 errors += 1
