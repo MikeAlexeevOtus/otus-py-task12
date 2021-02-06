@@ -21,6 +21,7 @@ AppsInstalled = collections.namedtuple(
     ["dev_type", "dev_id", "lat", "lon", "apps"]
 )
 
+STATUS_SKIP = -1
 STATUS_ERR = 0
 STATUS_OK = 1
 
@@ -90,54 +91,63 @@ def parse_appsinstalled(line):
     dev_type, dev_id, lat, lon, raw_apps = line_parts
     if not dev_type or not dev_id:
         return
+
     try:
         apps = [int(a.strip()) for a in raw_apps.split(",")]
     except ValueError:
         apps = [int(a.strip()) for a in raw_apps.split(",") if a.isidigit()]
         logging.info("Not all user apps are digits: `%s`" % line)
+
     try:
         lat, lon = float(lat), float(lon)
     except ValueError:
         logging.info("Invalid geo coords: `%s`" % line)
+        return
+
     return AppsInstalled(dev_type, dev_id, lat, lon, apps)
 
 
-def main(options):
-    mc_connections = init_mc_connections(options)
-    for fn in glob.iglob(options.pattern):
-        processed = errors = 0
-        logging.info('Processing %s', fn)
-        fd = gzip.open(fn)
-        for line in fd:
-            line = line.strip()
-            if not line:
-                continue
-            appsinstalled = parse_appsinstalled(line)
-            if not appsinstalled:
-                errors += 1
-                continue
-            protobuf_struct = make_protobuf_struct(appsinstalled)
-            status = put_to_mc(mc_connections,
-                               dev_type=appsinstalled.dev_type,
-                               key=make_key(appsinstalled),
-                               value=protobuf_struct.SerializeToString(),
-                               dry_run=options.dry)
-            if status == STATUS_OK:
-                processed += 1
-            else:
-                errors += 1
-        if not processed:
-            fd.close()
-            dot_rename(fn)
-            continue
+def process_one_line(line, mc_connections, dry_run):
+    line = line.strip()
+    if not line:
+        return STATUS_SKIP
+    appsinstalled = parse_appsinstalled(line)
+    if not appsinstalled:
+        return STATUS_ERR
+    protobuf_struct = make_protobuf_struct(appsinstalled)
+    return put_to_mc(mc_connections,
+                     dev_type=appsinstalled.dev_type,
+                     key=make_key(appsinstalled),
+                     value=protobuf_struct.SerializeToString(),
+                     dry_run=dry_run)
 
+
+def process_one_file(fn, mc_connections, dry_run):
+    processed = errors = 0
+    logging.info('Processing %s', fn)
+    fd = gzip.open(fn)
+    for line in fd:
+        status = process_one_line(line, mc_connections, dry_run)
+        if status == STATUS_OK:
+            processed += 1
+        else:
+            errors += 1
+
+    if processed:
         err_rate = float(errors) / processed
         if err_rate < NORMAL_ERR_RATE:
             logging.info("Acceptable error rate (%s). Successfull load" % err_rate)
         else:
             logging.error("High error rate (%s > %s). Failed load" % (err_rate, NORMAL_ERR_RATE))
-        fd.close()
-        dot_rename(fn)
+
+    fd.close()
+    dot_rename(fn)
+
+
+def main(options):
+    mc_connections = init_mc_connections(options)
+    for fn in glob.iglob(options.pattern):
+        process_one_file(fn, mc_connections)
 
 
 def prototest():
