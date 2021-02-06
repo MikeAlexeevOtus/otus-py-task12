@@ -122,6 +122,14 @@ def process_one_line(line, mc_connections, dry_run):
                      dry_run=dry_run)
 
 
+def log_err_stat(fn, processed, errors):
+    err_rate = float(errors) / processed
+    if err_rate < NORMAL_ERR_RATE:
+        logging.info("Acceptable error rate (%s). Successfull load %s", err_rate, fn)
+    else:
+        logging.error("High error rate (%s > %s). Failed load %s", err_rate, NORMAL_ERR_RATE, fn)
+
+
 def process_one_file(fn, mc_connections, dry_run):
     processed = errors = 0
     logging.info('Processing %s', fn)
@@ -134,11 +142,7 @@ def process_one_file(fn, mc_connections, dry_run):
             errors += 1
 
     if processed:
-        err_rate = float(errors) / processed
-        if err_rate < NORMAL_ERR_RATE:
-            logging.info("Acceptable error rate (%s). Successfull load" % err_rate)
-        else:
-            logging.error("High error rate (%s > %s). Failed load" % (err_rate, NORMAL_ERR_RATE))
+        log_err_stat(fn, processed, errors)
 
     fd.close()
     dot_rename(fn)
