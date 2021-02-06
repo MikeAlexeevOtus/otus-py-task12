@@ -47,6 +47,10 @@ def retry_if_fails(num_retries):
                     num_retries_ -= 1
             return func(*args, **kwargs)
 
+        return wrapper
+
+    return decorator
+
 
 def init_mc_connections(options):
     def connect(addr):
