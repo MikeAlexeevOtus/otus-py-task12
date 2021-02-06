@@ -1,0 +1,5 @@
+*.todo
+*.pyc
+*.todo
+.*.sw?
+tags
