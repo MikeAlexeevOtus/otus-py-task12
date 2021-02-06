@@ -71,14 +71,16 @@ def dot_rename(path):
     os.rename(path, os.path.join(head, "." + fn))
 
 
-def insert_appsinstalled(mc_connections, appsinstalled, dry_run=False):
+def make_protobuf_struct(appsinstalled):
     ua = appsinstalled_pb2.UserApps()
     ua.lat = appsinstalled.lat
     ua.lon = appsinstalled.lon
-    key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
     ua.apps.extend(appsinstalled.apps)
-    packed = ua.SerializeToString()
-    return put_to_mc(mc_connections, appsinstalled.dev_type, key, packed, dry_run)
+    return ua
+
+
+def make_key(appsinstalled):
+    return "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
 
 
 def parse_appsinstalled(line):
@@ -114,7 +116,12 @@ def main(options):
             if not appsinstalled:
                 errors += 1
                 continue
-            status = insert_appsinstalled(mc_connections, appsinstalled, options.dry)
+            protobuf_struct = make_protobuf_struct(appsinstalled)
+            status = put_to_mc(mc_connections,
+                               dev_type=appsinstalled.dev_type,
+                               key=make_key(appsinstalled),
+                               value=protobuf_struct.SerializeToString(),
+                               dry_run=options.dry)
             if status == STATUS_OK:
                 processed += 1
             else:
