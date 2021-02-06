@@ -27,7 +27,7 @@ STATUS_OK = 1
 
 McConnection = collections.namedtuple(
     "McConnection",
-    ["client", "lock"]
+    ["addr", "client", "lock"]
 )
 
 
@@ -36,30 +36,29 @@ def init_mc_connections(options):
         # @TODO retry and timeouts!
         return memcache.Client([addr])
 
-    return {
-        # TODO loop
-        "idfa": McConnection(connect(options.idfa), threading.Lock()),
-        "gaid": McConnection(connect(options.gaid), threading.Lock()),
-        "adid": McConnection(connect(options.adid), threading.Lock()),
-        "dvid": McConnection(connect(options.dvid), threading.Lock()),
-    }
+    mc_connections = {}
+    for dev_type in ['idfa', 'gaid', 'adid', 'dvid']:
+        addr = getattr(options, dev_type)
+        mc_connections[dev_type] = McConnection(addr, connect(addr), threading.Lock())
+
+    return mc_connections
 
 
 def close_mc_connections(mc_connections):
     pass
 
 
-def put_to_mc(mc_connections, dev_type, key, val, dry_run=False):
+def put_to_mc(mc_connections, dev_type, key, value, dry_run=False):
     mc_connection = mc_connections.get(dev_type)
     if not mc_connection:
         logging.error("Unknow device type: %s", dev_type)
         return STATUS_ERR
     if dry_run:
-        logging.debug("%s - %s -> %s" % (mc_connection.client, key, str(val).replace("\n", " ")))
+        logging.debug("%s - %s -> %s" % (mc_connection.addr, key, str(value).replace("\n", " ")))
         return STATUS_OK
 
     try:
-        mc_connection.client.set(key, val)
+        mc_connection.client.set(key, value)
         return STATUS_OK
     except Exception, e:
         logging.exception("Cannot write to memc %s: %s", mc_connection.client, e)
@@ -151,7 +150,7 @@ def process_one_file(fn, mc_connections, dry_run):
 def main(options):
     mc_connections = init_mc_connections(options)
     for fn in glob.iglob(options.pattern):
-        process_one_file(fn, mc_connections)
+        process_one_file(fn, mc_connections, options.dry)
 
 
 def prototest():

@@ -4,3 +4,4 @@
 .*.sw?
 tags
 .venv
+data
