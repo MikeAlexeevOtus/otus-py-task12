@@ -15,7 +15,10 @@ import appsinstalled_pb2
 import memcache
 
 NORMAL_ERR_RATE = 0.01
-AppsInstalled = collections.namedtuple("AppsInstalled", ["dev_type", "dev_id", "lat", "lon", "apps"])
+AppsInstalled = collections.namedtuple(
+    "AppsInstalled",
+    ["dev_type", "dev_id", "lat", "lon", "apps"]
+)
 
 
 def dot_rename(path):
@@ -108,7 +111,10 @@ def main(options):
 
 
 def prototest():
-    sample = "idfa\t1rfw452y52g2gq4g\t55.55\t42.42\t1423,43,567,3,7,23\ngaid\t7rfw452y52g2gq4g\t55.55\t42.42\t7423,424"
+    sample = (
+        "idfa\t1rfw452y52g2gq4g\t55.55\t42.42\t1423,43,567,3,7,23\n"
+        "gaid\t7rfw452y52g2gq4g\t55.55\t42.42\t7423,424"
+    )
     for line in sample.splitlines():
         dev_type, dev_id, lat, lon, raw_apps = line.strip().split("\t")
         apps = [int(a) for a in raw_apps.split(",") if a.isdigit()]
@@ -146,4 +152,3 @@ if __name__ == '__main__':
     except Exception, e:
         logging.exception("Unexpected error: %s" % e)
         sys.exit(1)
-
