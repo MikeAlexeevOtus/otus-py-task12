@@ -99,14 +99,14 @@ class Executor(object):
     MAX_RETRIES = 5
 
     def execute(self, task):
-        logging.debug('run in thread %s: %s', threading.currentThread().ident, self)
+        logging.debug('run in thread %s: %s', threading.currentThread().ident, task)
         if task.dry_run:
             task.results_list.append(STATUS_OK)
             return
 
         try:
             with task.mc_connection.lock:
-                self._set_mc_multi_value()
+                self._set_mc_multi_value(task)
             task.results_list.extend([STATUS_OK] * len(task.batch))
         except Exception, e:
             logging.exception("Cannot write to memc %s: %s", task.mc_connection.addr, e)
@@ -131,6 +131,8 @@ class UploadTask(object):
         s = "batch: %s\n" % self.mc_connection.addr
         for key, protobuf_val in self.batch.items():
             s += "\t%s -> %s\n" % (key, str(protobuf_val).replace("\n", " "))
+
+        return s
 
 
 def dot_rename(path):
