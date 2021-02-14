@@ -84,6 +84,7 @@ class Worker(threading.Thread):
     def __init__(self, queue):
         super(Worker, self).__init__()
         self.queue = queue
+        self.executor = Executor()
 
     def run(self):
         while True:
@@ -91,7 +92,32 @@ class Worker(threading.Thread):
             self.queue.task_done()
             if isinstance(task, str) and task == self.SENTINEL:
                 break
-            task.execute()
+            self.executor.execute(task)
+
+
+class Executor(object):
+    MAX_RETRIES = 5
+
+    def execute(self, task):
+        logging.debug('run in thread %s: %s', threading.currentThread().ident, self)
+        if task.dry_run:
+            task.results_list.append(STATUS_OK)
+            return
+
+        try:
+            with task.mc_connection.lock:
+                self._set_mc_multi_value()
+            task.results_list.extend([STATUS_OK] * len(task.batch))
+        except Exception, e:
+            logging.exception("Cannot write to memc %s: %s", task.mc_connection.addr, e)
+            task.results_list.extend([STATUS_ERR] * len(task.batch))
+
+    @retry_if_fails(MAX_RETRIES)
+    def _set_mc_multi_value(self, task):
+        multi_value = {
+            key: protobuf_val.SerializeToString() for key, protobuf_val in task.batch.items()
+        }
+        task.mc_connection.client.set_multi(multi_value)
 
 
 class UploadTask(object):
@@ -100,27 +126,6 @@ class UploadTask(object):
         self.batch = batch
         self.results_list = results_list
         self.dry_run = dry_run
-
-    def execute(self):
-        logging.debug('run in thread %s: %s', threading.currentThread().ident, self)
-        if self.dry_run:
-            self.results_list.append(STATUS_OK)
-            return
-
-        try:
-            with self.mc_connection.lock:
-                self._set_mc_multi_value()
-            self.results_list.extend([STATUS_OK] * len(self.batch))
-        except Exception, e:
-            logging.exception("Cannot write to memc %s: %s", self.mc_connection.addr, e)
-            self.results_list.extend([STATUS_ERR] * len(self.batch))
-
-    @retry_if_fails(5)
-    def _set_mc_multi_value(self):
-        multi_value = {
-            key: protobuf_val.SerializeToString() for key, protobuf_val in self.batch.items()
-        }
-        self.mc_connection.client.set_multi(multi_value)
 
     def __repr__(self):
         s = "batch: %s\n" % self.mc_connection.addr
