@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import Queue
+from collections import defaultdict
 from optparse import OptionParser
 # brew install protobuf
 # protoc  --python_out=. ./appsinstalled.proto
@@ -20,13 +21,15 @@ import memcache
 NUM_THREADS = 4
 BATCH_SIZE = 10
 NORMAL_ERR_RATE = 0.01
+MEMC_TIMEOUT = 3
+
+STATUS_ERR = 0
+STATUS_OK = 1
+
 AppsInstalled = collections.namedtuple(
     "AppsInstalled",
     ["dev_type", "dev_id", "lat", "lon", "apps"]
 )
-
-STATUS_ERR = 0
-STATUS_OK = 1
 
 McConnection = collections.namedtuple(
     "McConnection",
@@ -56,7 +59,7 @@ def retry_if_fails(num_retries):
 
 def init_mc_connections(options):
     def connect(addr):
-        return memcache.Client([addr])
+        return memcache.Client([addr], socket_timeout=MEMC_TIMEOUT)
 
     mc_connections = {}
     for dev_type in ['idfa', 'gaid', 'adid', 'dvid']:
@@ -66,6 +69,14 @@ def init_mc_connections(options):
     return mc_connections
 
 
+def get_mc_connection(mc_connections, dev_type):
+    mc_connection = mc_connections.get(dev_type)
+    if not mc_connection:
+        raise RuntimeError("Unknow device type: %s", dev_type)
+
+    return mc_connection
+
+
 class Worker(threading.Thread):
 
     SENTINEL = 'quit'
@@ -73,47 +84,55 @@ class Worker(threading.Thread):
     def __init__(self, queue):
         super(Worker, self).__init__()
         self.queue = queue
+        self.executor = Executor()
 
     def run(self):
         while True:
-            tasks_batch = self.queue.get()
+            task = self.queue.get()
             self.queue.task_done()
-            if isinstance(tasks_batch, str) and tasks_batch == self.SENTINEL:
+            if isinstance(task, str) and task == self.SENTINEL:
                 break
-            for task in tasks_batch:
-                task.execute()
+            self.executor.execute(task)
 
 
-class UploadTask(object):
-    def __init__(self, mc_connection, key, protobuf_struct, results_list, dry_run=False):
-        self.mc_connection = mc_connection
-        self.key = key
-        self.protobuf_struct = protobuf_struct
-        self.results_list = results_list
-        self.dry_run = dry_run
+class Executor(object):
+    MAX_RETRIES = 5
 
-    def execute(self):
-        logging.debug('run in thread %s: %s', threading.currentThread().ident, self)
-        if self.dry_run:
-            self.results_list.append(STATUS_OK)
+    def execute(self, task):
+        logging.debug('run in thread %s: %s', threading.currentThread().ident, task)
+        if task.dry_run:
+            task.results_list.append(STATUS_OK)
             return
 
         try:
-            with self.mc_connection.lock:
-                self._set_mc_value()
-            self.results_list.append(STATUS_OK)
+            with task.mc_connection.lock:
+                self._set_mc_multi_value(task)
+            task.results_list.extend([STATUS_OK] * len(task.batch))
         except Exception, e:
-            logging.exception("Cannot write to memc %s: %s", self.mc_connection.addr, e)
-            self.results_list.append(STATUS_ERR)
+            logging.exception("Cannot write to memc %s: %s", task.mc_connection.addr, e)
+            task.results_list.extend([STATUS_ERR] * len(task.batch))
 
-    @retry_if_fails(5)
-    def _set_mc_value(self):
-        self.mc_connection.client.set(self.key, self.protobuf_struct.SerializeToString())
+    @retry_if_fails(MAX_RETRIES)
+    def _set_mc_multi_value(self, task):
+        multi_value = {
+            key: protobuf_val.SerializeToString() for key, protobuf_val in task.batch.items()
+        }
+        task.mc_connection.client.set_multi(multi_value)
+
+
+class UploadTask(object):
+    def __init__(self, mc_connection, batch, results_list, dry_run=False):
+        self.mc_connection = mc_connection
+        self.batch = batch
+        self.results_list = results_list
+        self.dry_run = dry_run
 
     def __repr__(self):
-        return "%s - %s -> %s" % (self.mc_connection.addr,
-                                  self.key,
-                                  str(self.protobuf_struct).replace("\n", " "))
+        s = "batch: %s\n" % self.mc_connection.addr
+        for key, protobuf_val in self.batch.items():
+            s += "\t%s -> %s\n" % (key, str(protobuf_val).replace("\n", " "))
+
+        return s
 
 
 def dot_rename(path):
@@ -130,17 +149,19 @@ def make_protobuf_struct(appsinstalled):
     return ua
 
 
-def make_key(appsinstalled):
-    return "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
-
-
 def parse_appsinstalled(line):
+    line = line.strip()
+    if not line:
+        return
+
+    err = ValueError('failed to parse')
+
     line_parts = line.strip().split("\t")
     if len(line_parts) < 5:
-        return
+        raise err
     dev_type, dev_id, lat, lon, raw_apps = line_parts
     if not dev_type or not dev_id:
-        return
+        raise err
 
     try:
         apps = [int(a.strip()) for a in raw_apps.split(",")]
@@ -152,30 +173,9 @@ def parse_appsinstalled(line):
         lat, lon = float(lat), float(lon)
     except ValueError:
         logging.info("Invalid geo coords: `%s`" % line)
-        return
+        raise err
 
     return AppsInstalled(dev_type, dev_id, lat, lon, apps)
-
-
-def make_upload_task(line, mc_connections, results_list, dry_run):
-    line = line.strip()
-    if not line:
-        return
-    appsinstalled = parse_appsinstalled(line)
-    if not appsinstalled:
-        raise ValueError('failed to parse')
-    protobuf_struct = make_protobuf_struct(appsinstalled)
-
-    mc_connection = mc_connections.get(appsinstalled.dev_type)
-    if not mc_connection:
-        raise RuntimeError("Unknow device type: %s", appsinstalled.dev_type)
-
-    key = make_key(appsinstalled)
-    return UploadTask(mc_connection,
-                      key=key,
-                      protobuf_struct=protobuf_struct,
-                      results_list=results_list,
-                      dry_run=dry_run)
 
 
 def log_err_stat(fn, results_list):
@@ -188,23 +188,48 @@ def log_err_stat(fn, results_list):
         logging.error("High error rate (%s > %s). Failed load %s", err_rate, NORMAL_ERR_RATE, fn)
 
 
+def pop_batch(batches, batch_size):
+    for dev_type, batch in list(batches.items()):
+        if len(batch) >= batch_size:
+            return dev_type, batches.pop(dev_type)
+
+    return None, None
+
+
 def process_one_file(fn, mc_connections, tasks_queue, dry_run):
     results_list = []
     logging.info('Processing %s', fn)
     fd = gzip.open(fn)
-    tasks_batch = []
+    batches = defaultdict(dict)
+
     for line in fd:
         try:
-            tasks_batch.append(make_upload_task(line, mc_connections, results_list, dry_run))
+            appsinstalled = parse_appsinstalled(line)
+            protobuf_struct = make_protobuf_struct(appsinstalled)
+            key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
+            batches[appsinstalled.dev_type][key] = protobuf_struct
         except Exception as e:
             logging.error(e)
             results_list.append(STATUS_ERR)
-        if len(tasks_batch) == BATCH_SIZE:
-            tasks_queue.put(tasks_batch)
-            tasks_batch = []
+
+        dev_type, batch = pop_batch(batches, BATCH_SIZE)
+
+        if not batch:
+            continue
+
+        mc_connection = get_mc_connection(mc_connections, dev_type)
+        tasks_queue.put(
+            UploadTask(mc_connection, batch=batch, results_list=results_list, dry_run=dry_run))
 
     # add tasks from last iterations
-    tasks_queue.put(tasks_batch)
+    while True:
+        dev_type, batch = pop_batch(batches, 0)
+        if not batch:
+            break
+        mc_connection = get_mc_connection(mc_connections, dev_type)
+        tasks_queue.put(
+            UploadTask(mc_connection, batch=batch, results_list=results_list, dry_run=dry_run))
+
     tasks_queue.join()
     log_err_stat(fn, results_list)
 
