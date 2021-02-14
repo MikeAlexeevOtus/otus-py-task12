@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import Queue
+from collections import defaultdict
 from optparse import OptionParser
 # brew install protobuf
 # protoc  --python_out=. ./appsinstalled.proto
@@ -86,12 +87,11 @@ class Worker(threading.Thread):
 
     def run(self):
         while True:
-            tasks_batch = self.queue.get()
+            task = self.queue.get()
             self.queue.task_done()
-            if isinstance(tasks_batch, str) and tasks_batch == self.SENTINEL:
+            if isinstance(task, str) and task == self.SENTINEL:
                 break
-            for task in tasks_batch:
-                task.execute()
+            task.execute()
 
 
 class UploadTask(object):
@@ -109,14 +109,14 @@ class UploadTask(object):
 
         try:
             with self.mc_connection.lock:
-                self._set_multi_value()
+                self._set_mc_multi_value()
             self.results_list.extend([STATUS_OK] * len(self.batch))
         except Exception, e:
             logging.exception("Cannot write to memc %s: %s", self.mc_connection.addr, e)
             self.results_list.extend([STATUS_ERR] * len(self.batch))
 
     @retry_if_fails(5)
-    def _set_multi_value(self):
+    def _set_mc_multi_value(self):
         multi_value = {
             key: protobuf_val.SerializeToString() for key, protobuf_val in self.batch.items()
         }
@@ -193,7 +193,7 @@ def process_one_file(fn, mc_connections, tasks_queue, dry_run):
     results_list = []
     logging.info('Processing %s', fn)
     fd = gzip.open(fn)
-    batches = {}
+    batches = defaultdict(dict)
 
     for line in fd:
         try:
