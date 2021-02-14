@@ -20,13 +20,15 @@ import memcache
 NUM_THREADS = 4
 BATCH_SIZE = 10
 NORMAL_ERR_RATE = 0.01
+MEMC_TIMEOUT = 3
+
+STATUS_ERR = 0
+STATUS_OK = 1
+
 AppsInstalled = collections.namedtuple(
     "AppsInstalled",
     ["dev_type", "dev_id", "lat", "lon", "apps"]
 )
-
-STATUS_ERR = 0
-STATUS_OK = 1
 
 McConnection = collections.namedtuple(
     "McConnection",
@@ -56,7 +58,7 @@ def retry_if_fails(num_retries):
 
 def init_mc_connections(options):
     def connect(addr):
-        return memcache.Client([addr])
+        return memcache.Client([addr], socket_timeout=MEMC_TIMEOUT)
 
     mc_connections = {}
     for dev_type in ['idfa', 'gaid', 'adid', 'dvid']:
