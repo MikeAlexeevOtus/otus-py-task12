@@ -130,10 +130,6 @@ def make_protobuf_struct(appsinstalled):
     return ua
 
 
-def make_key(appsinstalled):
-    return "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
-
-
 def parse_appsinstalled(line):
     line_parts = line.strip().split("\t")
     if len(line_parts) < 5:
@@ -170,9 +166,8 @@ def make_upload_task(line, mc_connections, results_list, dry_run):
     if not mc_connection:
         raise RuntimeError("Unknow device type: %s", appsinstalled.dev_type)
 
-    key = make_key(appsinstalled)
     return UploadTask(mc_connection,
-                      key=key,
+                      key="%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id),
                       protobuf_struct=protobuf_struct,
                       results_list=results_list,
                       dry_run=dry_run)
